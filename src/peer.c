@@ -335,8 +335,18 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
     {
         if (command == COMMAND_REGISTER)
         {
-            // Your code here. This code has been added as a guide, but feel 
-            // free to add more, or work in other parts of the code
+            //allocating memory for another peer on the network and adding it 
+            pthread_mutex_lock(&network_mutex);
+            network = realloc(network, (peer_count+1) * sizeof(PeerAddress_t*));
+            network[peer_count] = malloc(sizeof(PeerAddress_t));
+            memcpy(network[peer_count]->ip, peer_address.ip, IP_LEN); //Updating the new peers ip
+            memcpy(network[peer_count]->port, peer_address.port, PORT_LEN); //updating the new peers port
+            peer_count++;
+            for (uint32_t i=0; i<peer_count; i++)
+            {
+                printf("Peer %d: %s:%s\n", i, network[i]->ip, network[i]->port);
+            }
+            pthread_mutex_unlock(&network_mutex);
         }
     } 
     else
@@ -384,11 +394,13 @@ void* client_thread(void* thread_args)
  * Handle any 'register' type requests, as defined in the asignment text. This
  * should always generate a response.
  */
-void handle_register(int connfd, char* client_ip, int client_port_int)
-{
+
+
+void handle_register(int connfd, char* client_ip, int client_port_int) {
     // Your code here. This function has been added as a guide, but feel free 
     // to add more, or work in other parts of the code
 }
+
 
 /*
  * Handle 'inform' type message as defined by the assignment text. These will 
