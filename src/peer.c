@@ -15,6 +15,7 @@
 
 #include "./peer.h"
 #include "./sha256.h"
+#include <stddef.h>
 
 
 // Global variables to be used by both the server and client side of the peer.
@@ -335,8 +336,38 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
     {
         if (command == COMMAND_REGISTER)
         {
-            // Your code here. This code has been added as a guide, but feel 
-            // free to add more, or work in other parts of the code
+            // Update the network list with the received peers
+            pthread_mutex_lock(&network_mutex);
+            for (uint32_t i = 0; i < reply_length; i += (IP_LEN + sizeof(uint32_t)))
+            {
+                char peer_ip[IP_LEN];
+                uint32_t peer_port;
+                memcpy(peer_ip, reply_body + i, IP_LEN);
+                peer_port = ntohl(*(uint32_t*)(reply_body + i + IP_LEN));
+
+                // Convert peer_port to string
+                char peer_port_str[PORT_LEN];
+                snprintf(peer_port_str, PORT_LEN, "%d", peer_port);
+
+                // Check if the peer already exists in the network list
+                int exists = 0;
+                for (uint32_t j = 0; j < peer_count; j++) {
+                    if (strcmp(network[j]->ip, peer_ip) == 0 && strcmp(network[j]->port, peer_port_str) == 0) {
+                        exists = 1;
+                        break;
+                    }
+                }
+                if (!exists) {
+                    // Add the new peer to the network list
+                    PeerAddress_t* new_peer = malloc(sizeof(PeerAddress_t));
+                    strncpy(new_peer->ip, peer_ip, IP_LEN);
+                    strncpy(new_peer->port, peer_port_str, PORT_LEN);
+                    network = realloc(network, (peer_count + 1) * sizeof(PeerAddress_t*));
+                    network[peer_count] = new_peer;
+                    peer_count++;
+                }
+            }
+            pthread_mutex_unlock(&network_mutex);
         }
     } 
     else
@@ -347,6 +378,45 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
     close(peer_socket);
 }
 
+void build_and_send_responses(int connfd, int status, char* to_send, uint32_t to_send_len) {
+    // Calculate the total checksum of the data to send
+    hashdata_t total_checksum;
+    get_data_sha(to_send, total_checksum, to_send_len, SHA256_HASH_SIZE);
+
+    // Calculate how long the payload can be
+    uint32_t sendable_length = MAX_MSG_LEN - REPLY_HEADER_LEN;
+
+    // Calculate the number of blocks
+    uint32_t blocks_count = (to_send_len + sendable_length - 1) / sendable_length;
+    uint32_t this_block = 0;
+
+    // Loop to send one or more blocks of payload
+    for (uint32_t offset = 0; offset < to_send_len; offset += sendable_length) {
+        // Determine the length of this block's payload
+        uint32_t this_payload_length = (offset + sendable_length > to_send_len) ? (to_send_len - offset) : sendable_length;
+
+        // Calculate the checksum of this block
+        hashdata_t block_checksum;
+        get_data_sha(to_send + offset, block_checksum, this_payload_length, SHA256_HASH_SIZE);
+
+        // Construct the reply header
+        struct ReplyHeader reply_header;
+        reply_header.length = htonl(this_payload_length);
+        reply_header.status = htonl(status);
+        reply_header.this_block = htonl(this_block);
+        reply_header.block_count = htonl(blocks_count);
+        memcpy(reply_header.block_hash, block_checksum, SHA256_HASH_SIZE);
+        memcpy(reply_header.total_hash, total_checksum, SHA256_HASH_SIZE);
+
+        // Send the reply header
+        compsys_helper_writen(connfd, &reply_header, REPLY_HEADER_LEN);
+
+        // Send the payload
+        compsys_helper_writen(connfd, to_send + offset, this_payload_length);
+
+        this_block++;
+    }
+}
 
 /*
  * Function to act as thread for all required client interactions. This thread 
@@ -358,76 +428,232 @@ void send_message(PeerAddress_t peer_address, int command, char* request_body,
  * preferred, this is merely presented as a convienient setup for meeting the 
  * assignment tasks
  */ 
-void* client_thread(void* thread_args)
-{
-    struct PeerAddress *peer_address = thread_args;
+void* client_thread(void* thread_args) {
+    // struct PeerAddress *peer_address = thread_args;
 
-    // Register the given user
-    send_message(*peer_address, COMMAND_REGISTER, "", 0);
+    // // Register the given user
+    // send_message(*peer_address, COMMAND_REGISTER, "", 0);
 
-    // Update peer_address with random peer from network
-    get_random_peer(peer_address);
+    // // Update peer_address with random peer from network
+    // get_random_peer(peer_address);
 
-    // Retrieve the smaller file, that doesn't not require support for blocks
-    send_message(*peer_address, COMMAND_RETREIVE, "tiny.txt", 8);
+    // // Retrieve the smaller file, that doesn't not require support for blocks
+    // send_message(*peer_address, COMMAND_RETREIVE, "tiny.txt", 8);
 
-    // Update peer_address with random peer from network
-    get_random_peer(peer_address);
+    // // Update peer_address with random peer from network
+    // get_random_peer(peer_address);
 
-    // Retrieve the larger file, that requires support for blocked messages
-    send_message(*peer_address, COMMAND_RETREIVE, "hamlet.txt", 10);
-
-    return NULL;
+    // // Retrieve the larger file, that requires support for blocked messages
+    // send_message(*peer_address, COMMAND_RETREIVE, "hamlet.txt", 10);
+    // return NULL;
 }
 
 /*
  * Handle any 'register' type requests, as defined in the asignment text. This
  * should always generate a response.
  */
-void handle_register(int connfd, char* client_ip, int client_port_int)
-{
-    // Your code here. This function has been added as a guide, but feel free 
-    // to add more, or work in other parts of the code
+void handle_register(int connfd, char* client_ip, int client_port_int) {
+    // Convert client_port_int to string
+    char client_port[PORT_LEN];
+    snprintf(client_port, PORT_LEN, "%d", client_port_int);
+
+    // Add the new peer to the network list
+    pthread_mutex_lock(&network_mutex);
+    // Check if the peer already exists in the network list
+    for (uint32_t i = 0; i < peer_count; i++) {
+        if (strcmp(network[i]->ip, client_ip) == 0 && strcmp(network[i]->port, client_port) == 0) {
+            pthread_mutex_unlock(&network_mutex);
+            // Send response indicating peer already exists
+            build_and_send_responses(connfd, STATUS_PEER_EXISTS, "", 0);
+            close(connfd);
+            return; // Peer already exists, no need to add
+        }
+    }
+    // Add the new peer to the network list
+    PeerAddress_t* new_peer = malloc(sizeof(PeerAddress_t));
+    strncpy(new_peer->ip, client_ip, IP_LEN);
+    strncpy(new_peer->port, client_port, PORT_LEN);
+    network = realloc(network, (peer_count + 1) * sizeof(PeerAddress_t*));
+    network[peer_count] = new_peer;
+    peer_count++;
+    pthread_mutex_unlock(&network_mutex);
+
+    // Construct the reply containing the entire network list
+    uint32_t reply_length = peer_count * (IP_LEN + sizeof(uint32_t));
+    char* reply_body = malloc(reply_length);
+    char* ptr = reply_body;
+    for (uint32_t i = 0; i < peer_count; i++) {
+        memcpy(ptr, network[i]->ip, IP_LEN);
+        ptr += IP_LEN;
+        uint32_t port = htonl(atoi(network[i]->port));
+        memcpy(ptr, &port, sizeof(uint32_t));
+        ptr += sizeof(uint32_t);
+    }
+
+    // Send the reply
+    build_and_send_responses(connfd, STATUS_OK, reply_body, reply_length);
+
+    free(reply_body);
+    close(connfd);
 }
 
 /*
  * Handle 'inform' type message as defined by the assignment text. These will 
  * never generate a response, even in the case of errors.
  */
-void handle_inform(char* request)
-{
-    // Your code here. This function has been added as a guide, but feel free 
-    // to add more, or work in other parts of the code
+void handle_inform(char* request) {
+    // Extract the new peer's IP and port from the request
+    char new_peer_ip[IP_LEN];
+    uint32_t new_peer_port;
+    memcpy(new_peer_ip, request, IP_LEN);
+    new_peer_port = ntohl(*(uint32_t*)(request + IP_LEN));
+
+    // Convert new_peer_port to string for comparison
+    char new_peer_port_str[PORT_LEN];
+    snprintf(new_peer_port_str, PORT_LEN, "%d", new_peer_port);
+
+    // Add the new peer to the network list
+    pthread_mutex_lock(&network_mutex);
+    // Check if the peer already exists in the network list
+    for (uint32_t i = 0; i < peer_count; i++) {
+        if (strcmp(network[i]->ip, new_peer_ip) == 0 && strcmp(network[i]->port, new_peer_port_str) == 0) {
+            pthread_mutex_unlock(&network_mutex);
+            return; // Peer already exists, no need to add
+        }
+    }
+    // Add the new peer to the network list
+    PeerAddress_t* new_peer = malloc(sizeof(PeerAddress_t));
+    strncpy(new_peer->ip, new_peer_ip, IP_LEN);
+    strncpy(new_peer->port, new_peer_port_str, PORT_LEN);
+    network = realloc(network, (peer_count + 1) * sizeof(PeerAddress_t*));
+    network[peer_count] = new_peer;
+    peer_count++;
+    pthread_mutex_unlock(&network_mutex);
 }
 
 /*
  * Handle 'retrieve' type messages as defined by the assignment text. This will
  * always generate a response
  */
-void handle_retreive(int connfd, char* request)
-{
-    // Your code here. This function has been added as a guide, but feel free 
-    // to add more, or work in other parts of the code
+void handle_retreive(int connfd, char* request) {
+    // Get the requested file path
+    char file_path[PATH_LEN];
+    strncpy(file_path, request, PATH_LEN);
+
+    // Check if the file exists
+    if (access(file_path, F_OK) != 0) {
+        // File does not exist, send an error response
+        build_and_send_responses(connfd, STATUS_BAD_REQUEST, "File not found", strlen("File not found"));
+        close(connfd);
+        return;
+    }
+
+    // Open the file for reading
+    FILE* fp = fopen(file_path, "rb");
+    if (fp == NULL) {
+        // Failed to open the file, send an error response
+        build_and_send_responses(connfd, STATUS_BAD_REQUEST, "Failed to open file", strlen("Failed to open file"));
+        close(connfd);
+        return;
+    }
+
+    // Get the file size
+    fseek(fp, 0, SEEK_END);
+    uint32_t file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    // Read the file content into a buffer
+    char* file_content = malloc(file_size);
+    fread(file_content, 1, file_size, fp);
+    fclose(fp);
+
+    // Send the file content as a response
+    build_and_send_responses(connfd, STATUS_OK, file_content, file_size);
+
+    free(file_content);
+    close(connfd);
 }
 
 /*
  * Handler for all server requests. This will call the relevent function based 
  * on the parsed command code
  */
-void handle_server_request_thread(int connfd)
-{
-    // Your code here. This function has been added as a guide, but feel free 
-    // to add more, or work in other parts of the code
+void handle_server_request_thread(int   connfd) {
+    compsys_helper_state_t state;
+    compsys_helper_readinitb(&state, connfd);
+
+    // Read the request header
+    char request_header[REQUEST_HEADER_LEN];
+    compsys_helper_readnb(&state, request_header, REQUEST_HEADER_LEN);
+
+    // Parse the request header
+    char client_ip[IP_LEN];
+    uint32_t client_port, command, request_length;
+    memcpy(client_ip, request_header, IP_LEN);
+    client_port = ntohl(*(uint32_t*)(request_header + IP_LEN));
+    command = ntohl(*(uint32_t*)(request_header + IP_LEN + sizeof(uint32_t)));
+    request_length = ntohl(*(uint32_t*)(request_header + IP_LEN + 2 * sizeof(uint32_t)));
+
+    // Read the request body
+    char* request_body = malloc(request_length + 1);
+    compsys_helper_readnb(&state, request_body, request_length);
+    request_body[request_length] = '\0';
+
+    // Handle the request based on the command
+    if (command == COMMAND_REGISTER) {
+        handle_register(connfd, client_ip, client_port);
+    } else if (command == COMMAND_INFORM) {
+        handle_inform(request_body);
+    } else if (command == COMMAND_RETREIVE) {
+        handle_retreive(connfd, request_body);
+    } else {
+        // Unknown command, send an error response
+        build_and_send_responses(connfd, STATUS_BAD_REQUEST, "Unknown command", strlen("Unknown command"));
+        close(connfd);
+    }
+
+    free(request_body);
 }
 
 /*
  * Function to act as basis for running the server thread. This thread will be
  * run concurrently with the client thread, but is infinite in nature.
  */
-void* server_thread()
-{
-    // Your code here. This function has been added as a guide, but feel free 
-    // to add more, or work in other parts of the code
+void* server_thread() {
+    int server_socket, client_socket;
+    struct sockaddr_in client_addr;
+    socklen_t client_len = sizeof(client_addr);
+
+    // Open a listening socket
+    server_socket = compsys_helper_open_listenfd(my_address->port);
+    if (server_socket < 0) {
+        perror("Failed to open listening socket");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Starting server at %s:%s\n", my_address->ip, my_address->port);
+
+    // Accept and handle incoming connections
+    while (1) {
+        client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_len);
+        if (client_socket < 0) {
+            perror("Accept failed");
+            continue;
+        }
+        // Handle the client request in a separate thread
+        pthread_t client_thread;
+        if (pthread_create(&client_thread, NULL, (void*(*)(void*))handle_server_request_thread, (void*)(intptr_t)client_socket) != 0) {
+            perror("Thread creation failed");
+            close(client_socket);
+            continue;
+        }
+        // Detach the thread so that it cleans up after itself
+        pthread_detach(client_thread);
+    }
+
+    // Close the server socket
+    close(server_socket);
+    return NULL;
 }
 
 
